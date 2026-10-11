@@ -1,0 +1,1387 @@
+<!DOCTYPE html>
+<!--
+  frontend/index.html
+  ===================
+  DuolingoLens — Single-Page Sentiment Analytics Dashboard
+  
+  Tabs   : Analyze | Batch Upload | Dashboard
+  Charts : Line (trend), Doughnut (distribution), Word clouds (keyword spans)
+  State  : window.appState holds the latest batch result for cross-tab rendering.
+  
+  Dependencies (CDN only — no build step):
+    Tailwind CSS  v3   https://cdn.tailwindcss.com
+    Chart.js      v4   https://cdn.jsdelivr.net/npm/chart.js
+    DL Plugin          https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels
+  
+  How to run:
+    python backend/app.py
+    Then open http://localhost:5000
+-->
+<html lang="id" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DuolingoLens — Analisis Sentimen</title>
+
+  <!-- ── Tailwind CSS ───────────────────────────────────────────────── -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- ── Chart.js ──────────────────────────────────────────────────── -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+
+  <script>
+    /* ── Tailwind theme extension ────────────────────────────────────── */
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#58CC02',   /* Duolingo green */
+            accent:  '#FFC800',   /* Duolingo yellow */
+            danger:  '#FF4B4B',   /* Duolingo red */
+            info:    '#1CB0F6',   /* Duolingo blue */
+            surface: '#F7F8FA',
+            border:  '#E5E7EB',
+            muted:   '#6B7280',
+          },
+          fontFamily: {
+            sans: ['-apple-system', '"Segoe UI"', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    };
+  </script>
+
+  <style>
+    /* ── Prevent chart resize jank ───────────────────────────────────── */
+    canvas { max-width: 100%; }
+
+    /* ── Word-cloud spans ────────────────────────────────────────────── */
+    .wc-word {
+      display: inline-block;
+      margin: 3px 6px;
+      padding: 2px 10px;
+      border-radius: 9999px;
+      cursor: default;
+      transition: transform .12s ease;
+      line-height: 1.6;
+    }
+    .wc-word:hover { transform: scale(1.14); }
+
+    /* ── Sidebar active state ────────────────────────────────────────── */
+    .nav-item-active {
+      background-color: #58CC0220;
+      color: #58CC02;
+      font-weight: 600;
+      border-left: 3px solid #58CC02;
+    }
+    .nav-item-inactive {
+      color: #4B5563;
+      border-left: 3px solid transparent;
+    }
+    .nav-item-inactive:hover {
+      background-color: #F3F4F6;
+      color: #1f2328;
+    }
+
+    /* ── Skeleton shimmer ────────────────────────────────────────────── */
+    @keyframes shimmer {
+      0%   { background-position: -600px 0; }
+      100% { background-position:  600px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg,#e5e7eb 25%,#f3f4f6 50%,#e5e7eb 75%);
+      background-size: 1200px 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 8px;
+    }
+
+    /* ── Progress bar animation ──────────────────────────────────────── */
+    @keyframes progress-indeterminate {
+      0%   { left: -35%; right: 100%; }
+      60%  { left: 100%; right: -90%; }
+      100% { left: 100%; right: -90%; }
+    }
+    .progress-bar {
+      position: absolute;
+      inset-block: 0;
+      background: #58CC02;
+      border-radius: 9999px;
+      animation: progress-indeterminate 1.4s infinite ease-in-out;
+    }
+
+    /* ── Anomaly row highlight ───────────────────────────────────────── */
+    .anomaly-row { background-color: #FFF7ED !important; }
+
+    /* ── Confidence mini-bar ──────────────────────────────────────────── */
+    .conf-bar-fill {
+      height: 6px;
+      border-radius: 9999px;
+      transition: width .3s ease;
+    }
+
+    /* ── Pagination controls ─────────────────────────────────────────── */
+    /*  Base button used by createPaginator — Tailwind utilities handle
+        most styling; this adds the disabled cursor that Tailwind's
+        disabled: variant can't set without JIT purge.              */
+    .pg-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+    /* Active page chip — Duolingo green background */
+    .pg-btn-active {
+      background-color: #58CC02;
+      color: #ffffff;
+      font-weight: 700;
+      border-color: #58CC02;
+    }
+    /* Hide numbered page buttons on mobile (< 640 px) */
+    @media (max-width: 639px) {
+      .pg-page-numbers { display: none; }
+    }
+  </style>
+</head>
+
+<body class="bg-surface text-gray-800 font-sans antialiased min-h-screen flex flex-col">
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     APP SHELL — sidebar + main content area
+═══════════════════════════════════════════════════════════════════════════ -->
+<div class="flex flex-1 overflow-hidden" style="min-height:100vh">
+
+  <!-- ── SIDEBAR ───────────────────────────────────────────────────────── -->
+  <aside
+    id="sidebar"
+    class="hidden md:flex flex-col w-64 bg-white border-r border-border shrink-0 h-screen sticky top-0"
+    role="navigation"
+    aria-label="Main navigation"
+  >
+    <!-- Logo -->
+    <div class="flex items-center gap-3 px-5 py-5 border-b border-border">
+      <svg width="38" height="38" viewBox="0 0 38 38" aria-hidden="true" focusable="false">
+        <circle cx="19" cy="19" r="19" fill="#58CC02"/>
+        <ellipse cx="14" cy="16" rx="5" ry="5.5" fill="white"/>
+        <ellipse cx="24" cy="16" rx="5" ry="5.5" fill="white"/>
+        <circle cx="14" cy="16" r="3" fill="#1f2328"/>
+        <circle cx="24" cy="16" r="3" fill="#1f2328"/>
+        <circle cx="15" cy="15" r="1" fill="white"/>
+        <circle cx="25" cy="15" r="1" fill="white"/>
+        <ellipse cx="19" cy="24" rx="6" ry="4" fill="#FFC800"/>
+        <path d="M16 23 Q19 26 22 23" stroke="#1f2328" stroke-width="1.2" fill="none"/>
+      </svg>
+      <div>
+        <p class="font-bold text-base leading-tight">DuolingoLens</p>
+        <p class="text-xs text-muted leading-tight">Sentiment Analytics</p>
+      </div>
+    </div>
+
+    <!-- Nav items -->
+    <nav class="flex-1 py-4 px-3 space-y-1" id="mainNav">
+      <button
+        id="nav-analyze"
+        class="nav-item-active w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all"
+        onclick="switchTab('analyze')"
+        aria-pressed="true"
+        aria-label="Switch to Analyze tab"
+      >
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+        </svg>
+        Analyze
+      </button>
+
+      <button
+        id="nav-batch"
+        class="nav-item-inactive w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all"
+        onclick="switchTab('batch')"
+        aria-pressed="false"
+        aria-label="Switch to Batch Upload tab"
+      >
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        </svg>
+        Batch Upload
+      </button>
+
+      <button
+        id="nav-dashboard"
+        class="nav-item-inactive w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all"
+        onclick="switchTab('dashboard')"
+        aria-pressed="false"
+        aria-label="Switch to Dashboard tab"
+      >
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        Dashboard
+      </button>
+    </nav>
+
+    <!-- Model health -->
+    <div class="px-4 py-4 border-t border-border">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <span id="healthDot" class="w-2 h-2 rounded-full bg-gray-300 shrink-0" aria-hidden="true"></span>
+        <span id="healthText">Checking model…</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MOBILE TOP BAR ────────────────────────────────────────────────── -->
+  <div class="md:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b border-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2 font-bold text-sm">
+      <svg width="28" height="28" viewBox="0 0 38 38" aria-hidden="true"><circle cx="19" cy="19" r="19" fill="#58CC02"/><ellipse cx="14" cy="16" rx="5" ry="5.5" fill="white"/><ellipse cx="24" cy="16" rx="5" ry="5.5" fill="white"/><circle cx="14" cy="16" r="3" fill="#1f2328"/><circle cx="24" cy="16" r="3" fill="#1f2328"/><ellipse cx="19" cy="24" rx="6" ry="4" fill="#FFC800"/></svg>
+      DuolingoLens
+    </div>
+    <div class="flex gap-1">
+      <button onclick="switchTab('analyze')" id="mob-analyze" class="px-3 py-1.5 text-xs rounded-lg bg-primary text-white font-semibold" aria-label="Analyze tab">Analyze</button>
+      <button onclick="switchTab('batch')"   id="mob-batch"   class="px-3 py-1.5 text-xs rounded-lg bg-gray-100 text-gray-600" aria-label="Batch tab">Batch</button>
+      <button onclick="switchTab('dashboard')" id="mob-dash"  class="px-3 py-1.5 text-xs rounded-lg bg-gray-100 text-gray-600" aria-label="Dashboard tab">Dashboard</button>
+    </div>
+  </div>
+
+  <!-- ── MAIN CONTENT ───────────────────────────────────────────────────── -->
+  <main class="flex-1 overflow-y-auto md:pt-0 pt-14">
+
+    <!-- Global error banner -->
+    <div id="errorBanner"
+      class="hidden mx-4 mt-4 md:mx-8 md:mt-6 bg-red-50 border border-red-200 text-red-700 rounded-xl px-5 py-3 text-sm flex items-start gap-2"
+      role="alert" aria-live="assertive"
+    >
+      <svg class="w-4 h-4 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM9 7a1 1 0 012 0v4a1 1 0 11-2 0V7zm1 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>
+      </svg>
+      <span id="errorText"></span>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         TAB 1 — ANALYZE
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section id="tab-analyze" class="px-4 py-6 md:px-8 md:py-8 space-y-6" aria-label="Analyze tab">
+
+      <div>
+        <h1 class="text-2xl font-bold">Analyze Review</h1>
+        <p class="text-muted text-sm mt-1">Enter an Indonesian Duolingo review to get instant sentiment prediction.</p>
+      </div>
+
+      <!-- Input card -->
+      <div class="bg-white rounded-xl border border-border shadow-sm p-6 space-y-4">
+        <label for="singleInput" class="block text-sm font-medium text-gray-700">
+          Review Text
+        </label>
+        <textarea
+          id="singleInput"
+          rows="5"
+          class="w-full rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary px-4 py-3 text-sm resize-none transition"
+          placeholder="Contoh: Aplikasi ini bagus banget, belajar jadi lebih menyenangkan. Tapi sering error waktu loading pelajaran..."
+          aria-label="Enter review text"
+          aria-describedby="charCount"
+        ></textarea>
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            onclick="analyzeText()"
+            class="bg-primary hover:bg-green-600 active:scale-95 text-white font-semibold px-6 py-2.5 rounded-xl text-sm transition shadow-sm"
+            aria-label="Analyze sentiment"
+          >
+            Analyze Sentiment
+          </button>
+          <button
+            onclick="clearAnalyze()"
+            class="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium px-4 py-2.5 rounded-xl text-sm transition"
+            aria-label="Clear input"
+          >
+            Clear
+          </button>
+          <span id="charCount" class="ml-auto text-xs text-muted" aria-live="polite">0 characters</span>
+        </div>
+      </div>
+
+      <!-- Result card (hidden until prediction arrives) -->
+      <div id="analyzeResult" class="hidden bg-white rounded-xl border border-border shadow-sm p-6 space-y-5">
+        <h2 class="text-sm font-semibold text-gray-700">Prediction Result</h2>
+
+        <!-- Label badge + confidence -->
+        <div class="flex flex-wrap items-center gap-4">
+          <span id="resultLabel"
+            class="inline-flex items-center px-4 py-1.5 rounded-full text-sm font-bold"
+            aria-live="polite"
+          >—</span>
+          <span id="resultConf" class="text-sm text-muted" aria-live="polite">Confidence: —</span>
+        </div>
+
+        <!-- Probability bar chart — horizontal bars built in plain HTML -->
+        <div class="space-y-2" aria-label="Probability breakdown">
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Positive</span><span id="posScore" aria-live="polite">—</span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-3">
+              <div id="posBar" class="bg-primary h-3 rounded-full transition-all duration-500" style="width:0%" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Positive probability"></div>
+            </div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Negative</span><span id="negScore" aria-live="polite">—</span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-3">
+              <div id="negBar" class="bg-danger h-3 rounded-full transition-all duration-500" style="width:0%" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Negative probability"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading skeleton for analyze -->
+      <div id="analyzeSkeleton" class="hidden space-y-3">
+        <div class="skeleton h-28 w-full"></div>
+      </div>
+
+    </section>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         TAB 2 — BATCH UPLOAD
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section id="tab-batch" class="hidden px-4 py-6 md:px-8 md:py-8 space-y-6" aria-label="Batch upload tab">
+
+      <div>
+        <h1 class="text-2xl font-bold">Batch Upload</h1>
+        <p class="text-muted text-sm mt-1">
+          Upload a Google Play scraping CSV. Accepted text columns:
+          <code class="bg-gray-100 px-1 rounded text-xs">review</code>,
+          <code class="bg-gray-100 px-1 rounded text-xs">ulasan</code>,
+          <code class="bg-gray-100 px-1 rounded text-xs">content</code>.
+          Optional: <code class="bg-gray-100 px-1 rounded text-xs">date</code>,
+          <code class="bg-gray-100 px-1 rounded text-xs">score</code>.
+          Max 5 000 rows.
+        </p>
+      </div>
+
+      <!-- Drop zone -->
+      <div
+        id="dropZone"
+        class="bg-white rounded-xl border-2 border-dashed border-gray-300 shadow-sm p-10 text-center cursor-pointer hover:border-primary hover:bg-green-50 transition"
+        onclick="document.getElementById('csvInput').click()"
+        ondragover="event.preventDefault(); this.classList.add('border-primary','bg-green-50')"
+        ondragleave="this.classList.remove('border-primary','bg-green-50')"
+        ondrop="handleDrop(event)"
+        role="button"
+        tabindex="0"
+        aria-label="Drop CSV file here or click to browse"
+        onkeydown="if(event.key==='Enter'||event.key===' ')document.getElementById('csvInput').click()"
+      >
+        <svg class="mx-auto mb-3 w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        <p class="text-sm text-gray-500">
+          Drag &amp; drop your <strong>.csv</strong> here, or
+          <span class="text-primary font-semibold">click to browse</span>
+        </p>
+        <p id="dropFileName" class="mt-2 text-xs text-muted"></p>
+      </div>
+      <input type="file" id="csvInput" accept=".csv" class="hidden" onchange="handleFileSelect(this)" aria-label="CSV file input"/>
+
+      <!-- Progress bar -->
+      <div id="batchProgress" class="hidden">
+        <div class="flex justify-between text-xs text-muted mb-1">
+          <span>Analyzing reviews…</span>
+          <span id="progressLabel">Please wait</span>
+        </div>
+        <div class="relative h-2 bg-gray-100 rounded-full overflow-hidden">
+          <div class="progress-bar w-1/3"></div>
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="flex flex-wrap gap-3">
+        <button
+          onclick="uploadBatch()"
+          class="bg-info hover:bg-blue-500 active:scale-95 text-white font-semibold px-6 py-2.5 rounded-xl text-sm transition shadow-sm"
+          aria-label="Start batch analysis"
+        >
+          Analyze CSV
+        </button>
+        <button
+          onclick="clearBatch()"
+          class="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium px-4 py-2.5 rounded-xl text-sm transition"
+          aria-label="Clear file selection"
+        >
+          Clear
+        </button>
+      </div>
+
+      <!-- Preview table (first 10 rows) -->
+      <div id="previewSection" class="hidden bg-white rounded-xl border border-border shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-700">Preview — first 10 results</h2>
+          <span id="previewTruncated" class="text-xs text-amber-600 font-medium hidden">⚠ Truncated to 5 000 rows</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" aria-label="Preview results table">
+            <thead class="bg-gray-50 text-xs text-muted uppercase tracking-wide">
+              <tr>
+                <th class="px-4 py-3 text-left">#</th>
+                <th class="px-4 py-3 text-left">Review</th>
+                <th class="px-4 py-3 text-left">Label</th>
+                <th class="px-4 py-3 text-left">Confidence</th>
+              </tr>
+            </thead>
+            <tbody id="previewBody" class="divide-y divide-gray-100"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         TAB 3 — DASHBOARD
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section id="tab-dashboard" class="hidden px-4 py-6 md:px-8 md:py-8 space-y-8" aria-label="Dashboard tab">
+
+      <!-- Empty state -->
+      <div id="dashEmpty" class="flex flex-col items-center justify-center py-20 text-center text-muted space-y-3">
+        <svg class="w-16 h-16 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        <p class="font-medium">No data yet</p>
+        <p class="text-sm max-w-xs">Upload a CSV in the <strong>Batch Upload</strong> tab to populate the dashboard.</p>
+        <button onclick="switchTab('batch')" class="mt-2 px-5 py-2 bg-primary text-white rounded-xl text-sm font-semibold shadow-sm">
+          Go to Batch Upload
+        </button>
+      </div>
+
+      <!-- Dashboard content (shown after batch upload) -->
+      <div id="dashContent" class="hidden space-y-8">
+
+        <div>
+          <h1 class="text-2xl font-bold">Dashboard</h1>
+          <p class="text-muted text-sm mt-1">Analisis dari data batch yang upload.</p>
+        </div>
+
+        <!-- ── KPI CARDS ──────────────────────────────────────────────── -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="bg-white rounded-xl border border-border shadow-sm p-5 flex flex-col gap-1" aria-label="Total reviews KPI">
+            <span class="text-xs text-muted font-medium uppercase tracking-wide">Total Reviews</span>
+            <span id="kpiTotal" class="text-3xl font-bold">—</span>
+          </div>
+          <div class="bg-white rounded-xl border border-green-200 shadow-sm p-5 flex flex-col gap-1" aria-label="Positive percentage KPI">
+            <span class="text-xs text-green-600 font-medium uppercase tracking-wide">% Positive</span>
+            <span id="kpiPosPct" class="text-3xl font-bold text-primary">—</span>
+            <span id="kpiPosCount" class="text-xs text-muted">—</span>
+          </div>
+          <div class="bg-white rounded-xl border border-red-200 shadow-sm p-5 flex flex-col gap-1" aria-label="Negative percentage KPI">
+            <span class="text-xs text-red-500 font-medium uppercase tracking-wide">% Negative</span>
+            <span id="kpiNegPct" class="text-3xl font-bold text-danger">—</span>
+            <span id="kpiNegCount" class="text-xs text-muted">—</span>
+          </div>
+          <div class="bg-white rounded-xl border border-blue-200 shadow-sm p-5 flex flex-col gap-1" aria-label="Average confidence KPI">
+            <span class="text-xs text-blue-500 font-medium uppercase tracking-wide">Avg Confidence</span>
+            <span id="kpiAvgConf" class="text-3xl font-bold text-info">—</span>
+          </div>
+        </div>
+
+        <!-- ── LINE + DOUGHNUT CHARTS ─────────────────────────────────── -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+          <!-- Line chart -->
+          <div class="bg-white rounded-xl border border-border shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-700 mb-4">Sentiment Trend Over Time</h2>
+            <div style="height:260px">
+              <canvas id="trendChart"
+                aria-label="Line chart showing sentiment trend over time"
+                role="img">
+                <p>Sentiment trend line chart — data not available in this browser.</p>
+              </canvas>
+            </div>
+          </div>
+
+          <!-- Doughnut chart -->
+          <div class="bg-white rounded-xl border border-border shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-700 mb-4">Sentiment Distribution</h2>
+            <div style="height:260px">
+              <canvas id="distChart"
+                aria-label="Doughnut chart showing positive vs negative distribution"
+                role="img">
+                <p>Sentiment distribution doughnut chart — data not available in this browser.</p>
+              </canvas>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- ── WORD CLOUDS ─────────────────────────────────────────────── -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+          <div class="bg-white rounded-xl border border-border shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-700 mb-1">
+              <span class="text-primary">●</span> Positive Keywords
+            </h2>
+            <p class="text-xs text-muted mb-4">Most frequent terms from positive reviews.</p>
+            <div id="wcPositive" class="leading-loose" aria-label="Positive keyword word cloud"></div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-border shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-gray-700 mb-1">
+              <span class="text-danger">●</span> Negative Keywords
+            </h2>
+            <p class="text-xs text-muted mb-4">Most frequent terms from negative reviews.</p>
+            <div id="wcNegative" class="leading-loose" aria-label="Negative keyword word cloud"></div>
+          </div>
+
+        </div>
+
+        <!-- ===== ANOMALY TABLE + PAGINATION ===== -->
+        <div id="anomalySection" class="hidden bg-white rounded-xl border border-border shadow-sm overflow-hidden">
+          <div class="px-5 py-4 border-b border-border">
+            <h2 class="text-sm font-semibold text-gray-700">Rating × Sentiment Anomaly Map</h2>
+            <p class="text-xs text-muted mt-1">
+              Rows highlighted in orange have a high star rating (≥ 4) but predicted
+              <strong>Negative</strong> sentiment, or a low rating (≤ 2) but predicted <strong>Positive</strong>.
+            </p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm" aria-label="Anomaly detection table">
+              <thead class="bg-gray-50 text-xs text-muted uppercase tracking-wide">
+                <tr>
+                  <th class="px-4 py-3 text-left">#</th>
+                  <th class="px-4 py-3 text-left">Review</th>
+                  <th class="px-4 py-3 text-left">Rating</th>
+                  <th class="px-4 py-3 text-left">Label</th>
+                  <th class="px-4 py-3 text-left">Anomaly?</th>
+                </tr>
+              </thead>
+              <tbody id="anomalyBody" class="divide-y divide-gray-100"></tbody>
+            </table>
+          </div>
+          <!-- Pagination bar injected by createPaginator into this container -->
+          <div id="anomalyPagination"></div>
+        </div>
+
+        <!-- ===== ALL RESULT TABLE + PAGINATION ===== -->
+        <div class="bg-white rounded-xl border border-border shadow-sm overflow-hidden">
+          <div class="px-5 py-4 border-b border-border flex flex-wrap items-center justify-between gap-3">
+            <h2 class="text-sm font-semibold text-gray-700">All Results</h2>
+            <div class="flex flex-wrap items-center gap-2">
+              <input
+                id="tableSearch"
+                type="text"
+                placeholder="Search reviews…"
+                oninput="filterResults()"
+                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary w-44"
+                aria-label="Search reviews"
+              />
+              <select
+                id="labelFilter"
+                onchange="filterResults()"
+                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary"
+                aria-label="Filter by sentiment label"
+              >
+                <option value="all">All Labels</option>
+                <option value="Positive">Positive</option>
+                <option value="Negative">Negative</option>
+              </select>
+              <button
+                onclick="exportResults()"
+                class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-lg transition"
+                aria-label="Export filtered results as CSV"
+              >
+                ⬇ Export CSV
+              </button>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm" aria-label="Full sentiment results table">
+              <thead class="bg-gray-50 text-xs text-muted uppercase tracking-wide">
+                <tr>
+                  <th class="px-4 py-3 text-left w-10">#</th>
+                  <th class="px-4 py-3 text-left">Review</th>
+                  <th class="px-4 py-3 text-left w-16">Rating</th>
+                  <th class="px-4 py-3 text-left w-24">Label</th>
+                  <th class="px-4 py-3 text-left w-36">Confidence</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody" class="divide-y divide-gray-100"></tbody>
+            </table>
+          </div>
+          <!-- Pagination bar injected by createPaginator into this container -->
+          <div id="resultsPagination"></div>
+        </div>
+
+      </div><!-- /dashContent -->
+    </section>
+
+  </main><!-- /main -->
+</div><!-- /app shell -->
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+═══════════════════════════════════════════════════════════════════════════ -->
+<script>
+"use strict";
+/* ─────────────────────────────────────────────────────────────────────────
+   Register Chart.js plugins once (DatalabelsPlugin needed for pie labels).
+   Registering globally keeps chart construction code clean.
+───────────────────────────────────────────────────────────────────────── */
+Chart.register(ChartDataLabels);
+
+/* ─────────────────────────────────────────────────────────────────────────
+   GLOBAL STATE
+   window.appState is the single source of truth for the latest batch result.
+   Any tab can re-render from it without re-calling the API.
+───────────────────────────────────────────────────────────────────────── */
+window.appState = {
+  batchData:    null,   // raw API response from /api/predict-batch
+  filtered:     [],     // currently filtered result array for All Results table
+  trendChart:   null,   // Chart.js instances (kept for destroy-before-recreate)
+  distChart:    null,
+  selectedFile: null,   // File object from the file picker
+  // Paginator instances — created/replaced on each batch load
+  anomalyPager: null,
+  resultsPager: null,
+};
+
+const COLORS = {
+  positive: '#58CC02',
+  negative: '#FF4B4B',
+  accent:   '#FFC800',
+  info:     '#1CB0F6',
+  wc: ['#58CC02','#1CB0F6','#FFC800','#FF4B4B','#7C3AED','#F97316','#06B6D4','#EC4899'],
+};
+
+/* ─────────────────────────────────────────────────────────────────────────
+   HEALTH CHECK
+   Polls /api/health once on page load and updates the sidebar indicator.
+───────────────────────────────────────────────────────────────────────── */
+async function checkHealth() {
+  const dot  = document.getElementById('healthDot');
+  const text = document.getElementById('healthText');
+  try {
+    const res  = await fetch('/api/health');
+    const data = await res.json();
+    if (data.model_loaded) {
+      dot.className  = 'w-2 h-2 rounded-full bg-primary shrink-0';
+      text.textContent = 'Model ready';
+    } else {
+      dot.className  = 'w-2 h-2 rounded-full bg-danger shrink-0';
+      text.textContent = data.error ? data.error.slice(0, 40) : 'Model not ready';
+    }
+  } catch {
+    dot.className  = 'w-2 h-2 rounded-full bg-gray-400 shrink-0';
+    text.textContent = 'Server unreachable';
+  }
+}
+checkHealth();
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TAB NAVIGATION
+   Controls which <section> is visible and updates ARIA pressed states.
+   Keyboard navigation: arrow keys cycle tabs (WCAG AA pattern).
+───────────────────────────────────────────────────────────────────────── */
+const TAB_IDS = ['analyze', 'batch', 'dashboard'];
+
+function switchTab(tab) {
+  TAB_IDS.forEach(id => {
+    // Toggle section visibility
+    document.getElementById(`tab-${id}`).classList.toggle('hidden', id !== tab);
+    // Desktop sidebar buttons
+    const btn = document.getElementById(`nav-${id === 'dashboard' ? 'dashboard' : id === 'batch' ? 'batch' : 'analyze'}`);
+    if (btn) {
+      const isActive = id === tab;
+      btn.className = isActive
+        ? 'nav-item-active w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all'
+        : 'nav-item-inactive w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all';
+      btn.setAttribute('aria-pressed', String(isActive));
+    }
+  });
+
+  // Desktop sidebar — map tab ids to nav button ids
+  const navMap = { analyze: 'nav-analyze', batch: 'nav-batch', dashboard: 'nav-dashboard' };
+  TAB_IDS.forEach(id => {
+    const navBtn = document.getElementById(navMap[id]);
+    if (!navBtn) return;
+    const isActive = id === tab;
+    navBtn.className = isActive
+      ? 'nav-item-active w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all'
+      : 'nav-item-inactive w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all';
+    navBtn.setAttribute('aria-pressed', String(isActive));
+  });
+
+  // Mobile top-bar buttons
+  const mobMap = { analyze: 'mob-analyze', batch: 'mob-batch', dashboard: 'mob-dash' };
+  TAB_IDS.forEach(id => {
+    const mobBtn = document.getElementById(mobMap[id]);
+    if (!mobBtn) return;
+    mobBtn.className = id === tab
+      ? 'px-3 py-1.5 text-xs rounded-lg bg-primary text-white font-semibold'
+      : 'px-3 py-1.5 text-xs rounded-lg bg-gray-100 text-gray-600';
+  });
+}
+
+/* Keyboard arrow navigation for the sidebar nav buttons */
+document.getElementById('mainNav').addEventListener('keydown', e => {
+  const buttons = [...document.getElementById('mainNav').querySelectorAll('button')];
+  const idx = buttons.indexOf(document.activeElement);
+  if (idx === -1) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); buttons[(idx + 1) % buttons.length].focus(); }
+  if (e.key === 'ArrowUp')   { e.preventDefault(); buttons[(idx - 1 + buttons.length) % buttons.length].focus(); }
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); buttons[idx].click(); }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ERROR / SUCCESS BANNERS
+───────────────────────────────────────────────────────────────────────── */
+function showError(msg) {
+  const banner = document.getElementById('errorBanner');
+  document.getElementById('errorText').textContent = msg;
+  banner.classList.remove('hidden');
+  // Auto-dismiss after 8 seconds
+  clearTimeout(showError._timer);
+  showError._timer = setTimeout(() => banner.classList.add('hidden'), 8000);
+}
+function hideError() {
+  document.getElementById('errorBanner').classList.add('hidden');
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TAB 1 — ANALYZE
+───────────────────────────────────────────────────────────────────────── */
+document.getElementById('singleInput').addEventListener('input', function () {
+  document.getElementById('charCount').textContent = `${this.value.length} characters`;
+});
+
+async function analyzeText() {
+  const text = document.getElementById('singleInput').value.trim();
+  if (!text) { showError('Please enter some review text before analyzing.'); return; }
+  hideError();
+
+  // Show skeleton, hide previous result
+  document.getElementById('analyzeSkeleton').classList.remove('hidden');
+  document.getElementById('analyzeResult').classList.add('hidden');
+
+  try {
+    const res  = await fetch('/api/predict', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error || 'Prediction failed.'); return; }
+    renderAnalyzeResult(data);
+  } catch (err) {
+    showError(`Network error: ${err.message}`);
+  } finally {
+    document.getElementById('analyzeSkeleton').classList.add('hidden');
+  }
+}
+
+function renderAnalyzeResult(data) {
+  const isPos   = data.label === 'Positive';
+  const posProb = ((data.probabilities?.Positive ?? 0) * 100).toFixed(1);
+  const negProb = ((data.probabilities?.Negative ?? 0) * 100).toFixed(1);
+
+  // Color-coded label badge
+  const labelEl = document.getElementById('resultLabel');
+  labelEl.textContent = data.label;
+  labelEl.className   = isPos
+    ? 'inline-flex items-center px-4 py-1.5 rounded-full text-sm font-bold bg-green-100 text-primary'
+    : 'inline-flex items-center px-4 py-1.5 rounded-full text-sm font-bold bg-red-100 text-danger';
+
+  document.getElementById('resultConf').textContent = `Confidence: ${(data.confidence * 100).toFixed(1)}%`;
+
+  // Probability bars
+  document.getElementById('posScore').textContent = `${posProb}%`;
+  document.getElementById('negScore').textContent = `${negProb}%`;
+  document.getElementById('posBar').style.width   = `${posProb}%`;
+  document.getElementById('posBar').setAttribute('aria-valuenow', posProb);
+  document.getElementById('negBar').style.width   = `${negProb}%`;
+  document.getElementById('negBar').setAttribute('aria-valuenow', negProb);
+
+  document.getElementById('analyzeResult').classList.remove('hidden');
+}
+
+function clearAnalyze() {
+  document.getElementById('singleInput').value = '';
+  document.getElementById('charCount').textContent = '0 characters';
+  document.getElementById('analyzeResult').classList.add('hidden');
+  hideError();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TAB 2 — BATCH UPLOAD
+───────────────────────────────────────────────────────────────────────── */
+function handleFileSelect(input) {
+  if (input.files && input.files[0]) {
+    window.appState.selectedFile = input.files[0];
+    document.getElementById('dropFileName').textContent = `Selected: ${input.files[0].name}`;
+    document.getElementById('dropZone').classList.add('border-primary', 'bg-green-50');
+  }
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropZone').classList.remove('border-primary', 'bg-green-50');
+  const file = e.dataTransfer.files[0];
+  if (!file || !file.name.toLowerCase().endsWith('.csv')) {
+    showError('Please drop a valid .csv file.');
+    return;
+  }
+  window.appState.selectedFile = file;
+  document.getElementById('dropFileName').textContent = `Selected: ${file.name}`;
+  document.getElementById('dropZone').classList.add('border-primary', 'bg-green-50');
+}
+
+async function uploadBatch() {
+  if (!window.appState.selectedFile) { showError('Please select a CSV file first.'); return; }
+  hideError();
+
+  // Show progress bar
+  document.getElementById('batchProgress').classList.remove('hidden');
+  document.getElementById('progressLabel').textContent = 'Please wait…';
+  document.getElementById('previewSection').classList.add('hidden');
+
+  const form = new FormData();
+  form.append('file', window.appState.selectedFile);
+
+  try {
+    const res  = await fetch('/api/predict-batch', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error || 'Batch prediction failed.'); return; }
+
+    // Notify about truncation
+    if (data.summary?.truncated) {
+      showError('⚠ CSV had more than 5 000 rows — only the first 5 000 were analyzed.');
+    }
+
+    // Persist batch data globally for Dashboard tab.
+    // Reset filtered array; paginators are re-created inside renderDashboard.
+    window.appState.batchData = data;
+    window.appState.filtered  = [...(data.results || [])];
+
+    // Render preview table (first 10 rows)
+    renderPreview(data.results);
+
+    // Auto-switch to Dashboard and render all charts
+    renderDashboard(data);
+    switchTab('dashboard');
+
+  } catch (err) {
+    showError(`Network error: ${err.message}`);
+  } finally {
+    document.getElementById('batchProgress').classList.add('hidden');
+  }
+}
+
+function renderPreview(results) {
+  const tbody = document.getElementById('previewBody');
+  tbody.innerHTML = results.slice(0, 10).map((r, i) => `
+    <tr class="${r.label === 'Positive' ? 'bg-green-50' : 'bg-red-50'} hover:opacity-90">
+      <td class="px-4 py-3 text-muted text-xs">${i + 1}</td>
+      <td class="px-4 py-3 text-gray-800 max-w-xs">
+        <p class="line-clamp-2 text-xs">${escapeHtml(r.review)}</p>
+      </td>
+      <td class="px-4 py-3">
+        <span class="${r.label === 'Positive' ? 'text-primary bg-green-100' : 'text-danger bg-red-100'} text-xs font-semibold px-2 py-0.5 rounded-full">
+          ${r.label}
+        </span>
+      </td>
+      <td class="px-4 py-3 text-xs text-muted">${(r.confidence * 100).toFixed(1)}%</td>
+    </tr>
+  `).join('');
+  document.getElementById('previewSection').classList.remove('hidden');
+}
+
+function clearBatch() {
+  window.appState.selectedFile = null;
+  document.getElementById('csvInput').value = '';
+  document.getElementById('dropFileName').textContent = '';
+  document.getElementById('dropZone').classList.remove('border-primary', 'bg-green-50');
+  document.getElementById('previewSection').classList.add('hidden');
+  document.getElementById('batchProgress').classList.add('hidden');
+  hideError();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TAB 3 — DASHBOARD
+───────────────────────────────────────────────────────────────────────── */
+function renderDashboard(data) {
+  document.getElementById('dashEmpty').classList.add('hidden');
+  document.getElementById('dashContent').classList.remove('hidden');
+
+  const s = data.summary;
+
+  // ── KPI cards ────────────────────────────────────────────────────────
+  document.getElementById('kpiTotal').textContent    = (s.total).toLocaleString();
+  document.getElementById('kpiPosPct').textContent   = `${s.positive_pct}%`;
+  document.getElementById('kpiPosCount').textContent = `${s.positive.toLocaleString()} reviews`;
+  document.getElementById('kpiNegPct').textContent   = `${s.negative_pct}%`;
+  document.getElementById('kpiNegCount').textContent = `${s.negative.toLocaleString()} reviews`;
+  document.getElementById('kpiAvgConf').textContent  = `${(s.avg_confidence * 100).toFixed(1)}%`;
+
+  // ── Line chart — sentiment trend ──────────────────────────────────────
+  renderTrendChart(data.trend);
+
+  // ── Doughnut chart — distribution ────────────────────────────────────
+  renderDistChart(s.positive, s.negative);
+
+  // ── Word clouds ────────────────────────────────────────────────────────
+  renderWordCloud('wcPositive', data.keywords_positive, COLORS.positive);
+  renderWordCloud('wcNegative', data.keywords_negative, COLORS.negative);
+
+  // ── Anomaly table (only if ratings present) ────────────────────────────
+  const hasRatings = data.results.some(r => r.rating != null);
+  if (hasRatings) {
+    const anomalies = buildAnomalies(data.results);
+    // Create/replace paginator — resets to page 1 automatically
+    window.appState.anomalyPager = createPaginator({
+      containerId: 'anomalyPagination',
+      tbodyId:     'anomalyBody',
+      dataArray:   anomalies,
+      renderRow:   renderAnomalyRow,
+      rowsPerPage: 5,
+      scrollToId:  'anomalySection',
+    });
+    window.appState.anomalyPager.render(1);
+    document.getElementById('anomalySection').classList.remove('hidden');
+  } else {
+    document.getElementById('anomalySection').classList.add('hidden');
+  }
+
+  // ── Full results table — create/replace paginator ───────────────────────
+  window.appState.resultsPager = createPaginator({
+    containerId: 'resultsPagination',
+    tbodyId:     'resultsBody',
+    dataArray:   window.appState.filtered,
+    renderRow:   renderResultRow,
+    rowsPerPage: 5,
+    scrollToId:  'resultsPagination',
+  });
+  window.appState.resultsPager.render(1);
+}
+
+/* Line chart */
+function renderTrendChart(trend) {
+  const ctx = document.getElementById('trendChart').getContext('2d');
+  if (window.appState.trendChart) window.appState.trendChart.destroy();
+
+  const labels  = trend.map(t => t.date);
+  const posData = trend.map(t => t.positive);
+  const negData = trend.map(t => t.negative);
+
+  window.appState.trendChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Positive',
+          data: posData,
+          borderColor: COLORS.positive,
+          backgroundColor: COLORS.positive + '22',
+          tension: 0.35,
+          fill: true,
+          pointRadius: labels.length > 50 ? 0 : 4,  // hide dots when there are many points
+          pointHoverRadius: 6,
+          borderWidth: 2,
+        },
+        {
+          label: 'Negative',
+          data: negData,
+          borderColor: COLORS.negative,
+          backgroundColor: COLORS.negative + '22',
+          tension: 0.35,
+          fill: true,
+          pointRadius: labels.length > 50 ? 0 : 4,
+          pointHoverRadius: 6,
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom', labels: { padding: 16, font: { size: 12 } } },
+        tooltip: { padding: 10 },
+        // Datalabels would be too crowded on a line chart — disable
+        datalabels: { display: false },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: {
+            font: { size: 11 },
+            maxTicksLimit: 12,
+            maxRotation: 45,
+          },
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: '#F3F4F6' },
+          ticks: { font: { size: 11 }, precision: 0 },
+        },
+      },
+    },
+  });
+}
+
+/* Doughnut chart */
+function renderDistChart(positive, negative) {
+  const ctx = document.getElementById('distChart').getContext('2d');
+  if (window.appState.distChart) window.appState.distChart.destroy();
+
+  window.appState.distChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Positive', 'Negative'],
+      datasets: [{
+        data: [positive, negative],
+        backgroundColor: [COLORS.positive, COLORS.negative],
+        borderWidth: 0,
+        hoverOffset: 10,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '60%',
+      plugins: {
+        legend: { position: 'bottom', labels: { padding: 16, font: { size: 12 } } },
+        datalabels: {
+          color: '#fff',
+          font: { weight: 'bold', size: 13 },
+          formatter: (val, ctx) => {
+            const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+            return total ? `${(val / total * 100).toFixed(1)}%` : '';
+          },
+        },
+      },
+    },
+  });
+}
+
+/* Word cloud — CSS-scaled colored spans */
+function renderWordCloud(containerId, words, baseColor) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  if (!words || words.length === 0) {
+    container.innerHTML = '<p class="text-xs text-muted italic">No keywords found.</p>';
+    return;
+  }
+  const maxWeight = words[0]?.weight || 1;
+  words.forEach((w, i) => {
+    const ratio     = w.weight / maxWeight;
+    const fontSize  = Math.max(11, Math.round(11 + ratio * 26));
+    const opacity   = Math.max(0.45, 0.45 + ratio * 0.55);
+    const color     = COLORS.wc[i % COLORS.wc.length];
+    const span      = document.createElement('span');
+    span.className  = 'wc-word';
+    span.textContent = w.word;
+    span.title      = `${w.word}: ${w.weight} occurrences`;
+    span.setAttribute('aria-label', `${w.word}: ${w.weight} occurrences`);
+    span.style.cssText = [
+      `font-size:${fontSize}px`,
+      `opacity:${opacity.toFixed(2)}`,
+      `background:${color}1a`,
+      `color:${color}`,
+      `border:1px solid ${color}33`,
+    ].join(';');
+    container.appendChild(span);
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   createPaginator — reusable client-side pagination factory
+   ─────────────────────────────────────────────────────────────────────────
+   Parameters:
+     containerId  {string}   — id of <div> where the pagination bar is injected
+     tbodyId      {string}   — id of <tbody> that receives rendered rows
+     dataArray    {Array}    — full dataset (never mutated; re-assign to update)
+     renderRow    {Function} — (item, globalIndex) => HTML string for one <tr>
+     rowsPerPage  {number}   — rows shown per page (default 10)
+     scrollToId   {string}   — id of element to scroll into view on page change
+
+   Returns an object with:
+     .render(page)  — render a specific page (1-based) and update controls
+     .goTo(page)    — alias for .render(page) (semantic sugar)
+     .next()        — go to current + 1 (no-op at last page)
+     .prev()        — go to current - 1 (no-op at first page)
+     .update(arr)   — replace dataArray and reset to page 1
+───────────────────────────────────────────────────────────────────────── */
+function createPaginator({ containerId, tbodyId, dataArray, renderRow, rowsPerPage = 10, scrollToId = null }) {
+  // Private mutable state scoped to this instance — no globals touched
+  let _data        = dataArray;
+  let _currentPage = 1;
+
+  /* ── helpers ── */
+  const totalPages = () => Math.max(1, Math.ceil(_data.length / rowsPerPage));
+
+  /* Build a sliding window of up to 5 consecutive page numbers centred on
+     the current page, with "…" ellipsis sentinels when the window doesn't
+     reach the first or last page.
+     Returns an array of numbers or the string '…'.                     */
+  function pageWindow(cur, total) {
+    if (total <= 7) {
+      // Small enough — show every page number, no ellipsis needed
+      return Array.from({ length: total }, (_, i) => i + 1);
+    }
+    const WINDOW = 5;  // visible numbered buttons on each side of current
+    const half   = Math.floor(WINDOW / 2);
+    let start = Math.max(2, cur - half);
+    let end   = Math.min(total - 1, start + WINDOW - 1);
+    // Clamp start so the window never goes below 2 or above (total-1)
+    if (end - start < WINDOW - 1) start = Math.max(2, end - WINDOW + 1);
+
+    const pages = [1];
+    if (start > 2) pages.push('…');
+    for (let p = start; p <= end; p++) pages.push(p);
+    if (end < total - 1) pages.push('…');
+    pages.push(total);
+    return pages;
+  }
+
+  /* Render the <tbody> rows for the given page number */
+  function renderBody(page) {
+    const tbody = document.getElementById(tbodyId);
+    if (!tbody) return;
+
+    const total = _data.length;
+    if (total === 0) {
+      // colspan matches widest table (5 columns)
+      tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-6 text-center text-muted text-sm">No data to display.</td></tr>';
+      return;
+    }
+
+    const start = (page - 1) * rowsPerPage;
+    const end   = Math.min(start + rowsPerPage, total);
+    // Build rows; pass the 1-based global index so row numbering is
+    // continuous across pages (page 2 row 1 shows index 11, not 1).
+    tbody.innerHTML = _data.slice(start, end)
+      .map((item, i) => renderRow(item, start + i))
+      .join('');
+  }
+
+  /* Build and inject the complete pagination bar into the container */
+  function renderControls(page) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const total = totalPages();
+    const atFirst = page <= 1;
+    const atLast  = page >= total;
+
+    /* Shared Tailwind classes for every button */
+    const BASE  = 'pg-btn inline-flex items-center justify-center rounded-lg border border-border text-xs px-2.5 py-1.5 transition focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1';
+    const IDLE  = 'bg-white hover:bg-gray-50 text-gray-700';
+    const OFF   = 'bg-white text-gray-300';   /* disabled visual */
+
+    /* Helper: make one button element as an HTML string */
+    const btn = (label, action, disabled, ariaLabel, extraClass = '') =>
+      `<button
+         class="${BASE} ${disabled ? OFF : IDLE} ${extraClass}"
+         ${disabled ? 'disabled' : ''}
+         onclick="${action}"
+         aria-label="${ariaLabel}"
+       >${label}</button>`;
+
+    /* Page-number chips (hidden on mobile via .pg-page-numbers) */
+    const chips = pageWindow(page, total)
+      .map(p => {
+        if (p === '…') {
+          return `<span class="px-1 text-muted text-xs select-none" aria-hidden="true">…</span>`;
+        }
+        const isActive = p === page;
+        return `<button
+          class="${BASE} ${isActive ? 'pg-btn-active' : IDLE} pg-page-numbers"
+          onclick="_pager_${containerId}.goTo(${p})"
+          aria-label="Go to page ${p}"
+          aria-current="${isActive ? 'page' : 'false'}"
+        >${p}</button>`;
+      })
+      .join('');
+
+    /* Info label — full on desktop, compact "3 / 25" on mobile */
+    const start = (_data.length === 0) ? 0 : (page - 1) * rowsPerPage + 1;
+    const end   = Math.min(page * rowsPerPage, _data.length);
+    const infoFull    = `Showing ${start.toLocaleString()}–${end.toLocaleString()} of ${_data.length.toLocaleString()} results`;
+    const infoMobile  = `${page} / ${total}`;
+
+    container.innerHTML = `
+      <div class="px-5 py-3 border-t border-border flex flex-wrap items-center justify-between gap-2 text-xs"
+           role="navigation" aria-label="Pagination">
+        <!-- Row count info -->
+        <span class="text-muted hidden sm:inline">${infoFull}</span>
+        <!-- Mobile compact info shown between Prev and Next -->
+        <div class="flex items-center gap-1.5 flex-wrap">
+          ${btn('« First', `_pager_${containerId}.goTo(1)`,        atFirst, 'Go to first page')}
+          ${btn('‹ Prev',  `_pager_${containerId}.prev()`,          atFirst, 'Go to previous page')}
+          <!-- Compact page indicator — visible only on mobile -->
+          <span class="sm:hidden text-muted font-medium px-2">${infoMobile}</span>
+          <!-- Numbered chips — hidden on mobile via CSS -->
+          <div class="pg-page-numbers hidden sm:contents" aria-label="Page numbers">${chips}</div>
+          ${btn('Next ›', `_pager_${containerId}.next()`,           atLast,  'Go to next page')}
+          ${btn('Last »', `_pager_${containerId}.goTo(${total})`,   atLast,  'Go to last page')}
+        </div>
+      </div>`;
+
+    // Focus-ring guard: re-query newly injected buttons and ensure keyboard
+    // users can Tab through them (no tabindex needed; buttons are focusable)
+  }
+
+  /* ── Public API ── */
+  const api = {
+    render(page) {
+      // Clamp to valid range
+      _currentPage = Math.max(1, Math.min(page, totalPages()));
+      renderBody(_currentPage);
+      renderControls(_currentPage);
+      // Scroll target to top — avoids disorienting jumps when switching pages
+      if (scrollToId) {
+        const el = document.getElementById(scrollToId);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    },
+    goTo(page)  { api.render(page); },
+    next()      { if (_currentPage < totalPages()) api.render(_currentPage + 1); },
+    prev()      { if (_currentPage > 1)            api.render(_currentPage - 1); },
+    /* Replace the dataset and reset to page 1 — used by filterResults() */
+    update(arr) { _data = arr; api.render(1); },
+  };
+
+  /* Expose instance on window under a deterministic key so the onclick
+     strings generated inside renderControls can find it without closures
+     (HTML attribute onclick strings don't have access to local variables). */
+  window[`_pager_${containerId}`] = api;
+
+  return api;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ROW RENDERERS — pure functions (item, globalIndex) => HTML string
+   Each receives the item from the data array and its 1-based display index.
+───────────────────────────────────────────────────────────────────────── */
+
+/* Build the filtered anomaly dataset (pure, no side-effects) */
+function buildAnomalies(results) {
+  return results.filter(r =>
+    r.rating != null && (
+      (r.rating >= 4 && r.label === 'Negative') ||
+      (r.rating <= 2 && r.label === 'Positive')
+    )
+  );
+}
+
+/* Render one row for the Anomaly table.
+   The amber anomaly-row class is applied on every page — not just page 1. */
+function renderAnomalyRow(r, idx) {
+  // Truncate review to 80 chars; full text available as tooltip (title attr)
+  const displayText = r.review.length > 80 ? r.review.slice(0, 80) + '…' : r.review;
+  return `
+    <tr class="anomaly-row hover:opacity-90">
+      <td class="px-4 py-3 text-muted text-xs">${idx + 1}</td>
+      <td class="px-4 py-3 text-gray-800 max-w-xs">
+        <p class="text-xs" title="${escapeHtml(r.review)}">${escapeHtml(displayText)}</p>
+      </td>
+      <td class="px-4 py-3 text-sm">
+        ${'⭐'.repeat(Math.min(r.rating, 5))}
+        <span class="text-xs text-muted ml-1">${r.rating}</span>
+      </td>
+      <td class="px-4 py-3">
+        <span class="${r.label === 'Positive' ? 'text-primary bg-green-100' : 'text-danger bg-red-100'} text-xs font-semibold px-2 py-0.5 rounded-full">
+          ${r.label}
+        </span>
+      </td>
+      <td class="px-4 py-3 text-xs font-semibold text-amber-600">⚠ Anomaly</td>
+    </tr>`;
+}
+
+/* Render one row for the All Results table.
+   idx is 0-based so we add 1 for the display number — continuous across pages. */
+function renderResultRow(r, idx) {
+  const confPct     = (r.confidence * 100).toFixed(1);
+  const rating      = r.rating != null
+    ? `${'⭐'.repeat(Math.min(r.rating, 5))}<span class="text-xs text-muted ml-1">${r.rating}</span>`
+    : '—';
+  // Truncate review to 80 chars; full text in title tooltip
+  const displayText = r.review.length > 80 ? r.review.slice(0, 80) + '…' : r.review;
+  return `
+    <tr class="${r.label === 'Positive' ? 'bg-green-50' : 'bg-red-50'} hover:opacity-90">
+      <td class="px-4 py-3 text-muted text-xs">${idx + 1}</td>
+      <td class="px-4 py-3 max-w-sm">
+        <p class="text-xs text-gray-700" title="${escapeHtml(r.review)}">${escapeHtml(displayText)}</p>
+      </td>
+      <td class="px-4 py-3 text-xs">${rating}</td>
+      <td class="px-4 py-3">
+        <span class="${r.label === 'Positive' ? 'text-primary bg-green-100' : 'text-danger bg-red-100'} text-xs font-semibold px-2 py-0.5 rounded-full">
+          ${r.label}
+        </span>
+      </td>
+      <td class="px-4 py-3">
+        <div class="flex items-center gap-2">
+          <div class="w-20 bg-gray-200 rounded-full h-1.5">
+            <div class="conf-bar-fill ${r.label === 'Positive' ? 'bg-primary' : 'bg-danger'}" style="width:${confPct}%"></div>
+          </div>
+          <span class="text-xs text-muted">${confPct}%</span>
+        </div>
+      </td>
+    </tr>`;
+}
+
+/* filterResults — rebuild the filtered dataset and reset the results paginator */
+function filterResults() {
+  const q     = document.getElementById('tableSearch').value.toLowerCase();
+  const label = document.getElementById('labelFilter').value;
+  const all   = window.appState.batchData?.results || [];
+
+  window.appState.filtered = all.filter(r => {
+    const textMatch  = !q || r.review.toLowerCase().includes(q);
+    const labelMatch = label === 'all' || r.label === label;
+    return textMatch && labelMatch;
+  });
+
+  // If the paginator exists (i.e. a batch has been loaded), push new data
+  // and reset to page 1 — no API call needed, uses window.appState.
+  if (window.appState.resultsPager) {
+    window.appState.resultsPager.update(window.appState.filtered);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   EXPORT FILTERED RESULTS AS CSV
+───────────────────────────────────────────────────────────────────────── */
+function exportResults() {
+  const rows    = window.appState.filtered;
+  const headers = ['#', 'review', 'label', 'confidence', 'rating'];
+  const lines   = rows.map((r, i) =>
+    [
+      i + 1,
+      `"${(r.review || '').replace(/"/g, '""')}"`,
+      r.label,
+      r.confidence,
+      r.rating ?? '',
+    ].join(',')
+  );
+  const csv  = [headers.join(','), ...lines].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'duolingo_sentiment_results.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   UTILITY — escape HTML to prevent XSS in review text rendered into tables
+───────────────────────────────────────────────────────────────────────── */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+</script>
+
+</body>
+</html>

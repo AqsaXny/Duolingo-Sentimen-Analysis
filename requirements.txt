@@ -1,0 +1,7 @@
+flask==3.0.3
+torch==2.3.1
+transformers==4.41.2
+safetensors==0.4.3
+pandas==2.2.2
+Sastrawi==1.0.1
+Werkzeug==3.0.3

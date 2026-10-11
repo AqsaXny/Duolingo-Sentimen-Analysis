@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DuolingoLens — Sentiment Analytics Dashboard</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <!-- Chart.js Datalabels plugin -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            duo: {
+              green:  '#58CC02',
+              blue:   '#1CB0F6',
+              yellow: '#FFC800',
+              red:    '#FF4B4B',
+              dark:   '#1f2328',
+              surface:'#f7f8fa',
+            }
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'Segoe UI', 'system-ui', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* ── scrollbar ─────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f7f8fa; }
+    ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+
+    /* ── word cloud ─────────────────────────────────────────── */
+    #wordCloudContainer span {
+      display: inline-block;
+      margin: 3px 5px;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      cursor: default;
+      transition: transform .15s;
+    }
+    #wordCloudContainer span:hover { transform: scale(1.12); }
+
+    /* ── result table row highlight ────────────────────────── */
+    .row-positive { background-color: #f0fdf4; }
+    .row-negative { background-color: #fff1f2; }
+
+    /* ── skeleton loader ────────────────────────────────────── */
+    @keyframes shimmer {
+      0% { background-position: -400px 0; }
+      100% { background-position: 400px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 6px;
+    }
+
+    /* ── confidence badge ────────────────────────────────────── */
+    .badge-pos { @apply bg-green-100 text-green-800 text-xs font-semibold px-2 py-0.5 rounded-full; }
+    .badge-neg { @apply bg-red-100   text-red-800   text-xs font-semibold px-2 py-0.5 rounded-full; }
+    .badge-unk { @apply bg-gray-100  text-gray-600  text-xs font-semibold px-2 py-0.5 rounded-full; }
+
+    /* ── tab active state ───────────────────────────────────── */
+    .tab-active {
+      border-bottom: 3px solid #58CC02;
+      color: #1f2328;
+      font-weight: 600;
+    }
+    .tab-inactive {
+      border-bottom: 3px solid transparent;
+      color: #6b7280;
+    }
+  </style>
+</head>
+
+<body class="bg-duo-surface text-duo-dark font-sans antialiased min-h-screen">
+
+  <!-- ════════════════════════════════════════════════════════
+       NAVBAR
+  ═══════════════════════════════════════════════════════════ -->
+  <nav class="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <!-- Duolingo-style owl icon (SVG inline) -->
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="18" cy="18" r="18" fill="#58CC02"/>
+          <ellipse cx="13" cy="15" rx="5" ry="5.5" fill="white"/>
+          <ellipse cx="23" cy="15" rx="5" ry="5.5" fill="white"/>
+          <circle cx="13" cy="15" r="3" fill="#1f2328"/>
+          <circle cx="23" cy="15" r="3" fill="#1f2328"/>
+          <circle cx="14" cy="14" r="1" fill="white"/>
+          <circle cx="24" cy="14" r="1" fill="white"/>
+          <ellipse cx="18" cy="23" rx="6" ry="4" fill="#FFC800"/>
+          <path d="M15 22 Q18 25 21 22" stroke="#1f2328" stroke-width="1.2" fill="none"/>
+        </svg>
+        <div>
+          <h1 class="text-lg font-bold leading-tight">DuolingoLens</h1>
+          <p class="text-xs text-gray-500 leading-tight">Sentiment Analytics Dashboard</p>
+        </div>
+      </div>
+      <!-- Health indicator -->
+      <div id="healthBadge" class="flex items-center gap-1.5 text-xs text-gray-500">
+        <span id="healthDot" class="inline-block w-2 h-2 rounded-full bg-gray-300"></span>
+        <span id="healthText">Checking model…</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ════════════════════════════════════════════════════════
+       MAIN CONTENT
+  ═══════════════════════════════════════════════════════════ -->
+  <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
+
+    <!-- ── INPUT SECTION ──────────────────────────────────── -->
+    <section class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <!-- Tab bar -->
+      <div class="flex border-b border-gray-200 px-6">
+        <button id="tabText" onclick="switchTab('text')"
+          class="tab-active py-3 px-4 text-sm transition-all">
+          ✏️ Manual Text
+        </button>
+        <button id="tabCsv" onclick="switchTab('csv')"
+          class="tab-inactive py-3 px-4 text-sm transition-all">
+          📂 Upload CSV
+        </button>
+      </div>
+
+      <!-- Text input panel -->
+      <div id="panelText" class="p-6 space-y-4">
+        <label class="block text-sm font-medium text-gray-700">
+          Enter a Duolingo review in Indonesian (or mixed language):
+        </label>
+        <textarea id="textInput" rows="4"
+          placeholder="contoh: Aplikasi ini bagus banget, tapi sering error waktu loading pelajaran..."
+          class="w-full rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-duo-green px-4 py-3 text-sm resize-none transition"></textarea>
+        <div class="flex items-center gap-3">
+          <button onclick="predictText()"
+            class="bg-duo-green hover:bg-green-600 text-white font-semibold px-6 py-2.5 rounded-xl text-sm transition shadow-sm">
+            Analyze Sentiment
+          </button>
+          <button onclick="clearText()"
+            class="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium px-4 py-2.5 rounded-xl text-sm transition">
+            Clear
+          </button>
+          <span id="charCount" class="ml-auto text-xs text-gray-400">0 characters</span>
+        </div>
+      </div>
+
+      <!-- CSV upload panel (hidden by default) -->
+      <div id="panelCsv" class="p-6 space-y-4 hidden">
+        <label class="block text-sm font-medium text-gray-700">
+          Upload a CSV file from Google Play Store scraping results:
+        </label>
+        <p class="text-xs text-gray-500">
+          Required column (any of): <code class="bg-gray-100 px-1 rounded">content</code>,
+          <code class="bg-gray-100 px-1 rounded">review</code>,
+          <code class="bg-gray-100 px-1 rounded">text</code>,
+          <code class="bg-gray-100 px-1 rounded">ulasan</code>.
+          Optional: <code class="bg-gray-100 px-1 rounded">score</code> / <code class="bg-gray-100 px-1 rounded">rating</code>
+          for rating–sentiment analysis. Max 1 000 rows.
+        </p>
+        <div id="dropZone"
+          class="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center cursor-pointer hover:border-duo-green hover:bg-green-50 transition"
+          ondragover="event.preventDefault()" ondrop="handleDrop(event)" onclick="document.getElementById('csvFileInput').click()">
+          <svg class="mx-auto mb-2 w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <p class="text-sm text-gray-500">Drag & drop your CSV here, or <span class="text-duo-green font-medium">click to browse</span></p>
+          <p id="fileName" class="mt-1 text-xs text-gray-400"></p>
+        </div>
+        <input type="file" id="csvFileInput" accept=".csv" class="hidden" onchange="handleFileSelect(this)"/>
+        <div class="flex items-center gap-3">
+          <button onclick="predictCsv()"
+            class="bg-duo-blue hover:bg-blue-500 text-white font-semibold px-6 py-2.5 rounded-xl text-sm transition shadow-sm">
+            Analyze CSV
+          </button>
+          <button onclick="clearCsv()"
+            class="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium px-4 py-2.5 rounded-xl text-sm transition">
+            Clear
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ERROR / WARNING BANNER ─────────────────────────── -->
+    <div id="errorBanner" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl px-5 py-3 text-sm flex items-start gap-2">
+      <svg class="w-4 h-4 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM9 7a1 1 0 012 0v4a1 1 0 11-2 0V7zm1 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>
+      </svg>
+      <span id="errorText"></span>
+    </div>
+
+    <!-- ── LOADING SKELETON ───────────────────────────────── -->
+    <div id="loadingSkeleton" class="hidden space-y-4">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="skeleton h-24 rounded-2xl"></div>
+        <div class="skeleton h-24 rounded-2xl"></div>
+        <div class="skeleton h-24 rounded-2xl"></div>
+        <div class="skeleton h-24 rounded-2xl"></div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="skeleton h-64 rounded-2xl"></div>
+        <div class="skeleton h-64 rounded-2xl"></div>
+      </div>
+    </div>
+
+    <!-- ── RESULTS DASHBOARD (hidden until data arrives) ─── -->
+    <div id="dashboard" class="hidden space-y-6">
+
+      <!-- ── KPI CARDS ──────────────────────────────────── -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 flex flex-col gap-1">
+          <span class="text-xs text-gray-500 font-medium uppercase tracking-wide">Total Reviews</span>
+          <span id="kpiTotal" class="text-3xl font-bold text-duo-dark">—</span>
+        </div>
+        <div class="bg-white rounded-2xl border border-green-200 shadow-sm p-5 flex flex-col gap-1">
+          <span class="text-xs text-green-600 font-medium uppercase tracking-wide">Positive</span>
+          <span id="kpiPositive" class="text-3xl font-bold text-duo-green">—</span>
+          <span id="kpiPositivePct" class="text-xs text-gray-400">—</span>
+        </div>
+        <div class="bg-white rounded-2xl border border-red-200 shadow-sm p-5 flex flex-col gap-1">
+          <span class="text-xs text-red-500 font-medium uppercase tracking-wide">Negative</span>
+          <span id="kpiNegative" class="text-3xl font-bold text-duo-red">—</span>
+          <span id="kpiNegativePct" class="text-xs text-gray-400">—</span>
+        </div>
+        <div class="bg-white rounded-2xl border border-blue-200 shadow-sm p-5 flex flex-col gap-1">
+          <span class="text-xs text-blue-500 font-medium uppercase tracking-wide">Sentiment Ratio</span>
+          <span id="kpiRatio" class="text-3xl font-bold text-duo-blue">—</span>
+          <span class="text-xs text-gray-400">Pos / Neg</span>
+        </div>
+      </div>
+
+      <!-- ── SINGLE RESULT HIGHLIGHT (text mode only) ─── -->
+      <div id="singleResult" class="hidden bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+        <h2 class="text-sm font-semibold text-gray-700 mb-3">Prediction Result</h2>
+        <div class="flex flex-col md:flex-row gap-4 items-start">
+          <div class="flex-1 space-y-2">
+            <div>
+              <span class="text-xs text-gray-400 uppercase tracking-wide">Original Text</span>
+              <p id="srRawText" class="text-sm text-gray-800 mt-1 leading-relaxed"></p>
+            </div>
+            <div>
+              <span class="text-xs text-gray-400 uppercase tracking-wide">Cleaned Text</span>
+              <p id="srCleanedText" class="text-sm text-gray-500 mt-1 italic leading-relaxed"></p>
+            </div>
+          </div>
+          <div class="md:w-48 flex flex-col items-center gap-3 bg-gray-50 rounded-xl p-4">
+            <span id="srLabel" class="text-2xl font-bold">—</span>
+            <div class="w-full space-y-2">
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-0.5">
+                  <span>Positive</span><span id="srPosScore">—</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2">
+                  <div id="srPosBar" class="bg-duo-green h-2 rounded-full transition-all" style="width:0%"></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-0.5">
+                  <span>Negative</span><span id="srNegScore">—</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2">
+                  <div id="srNegBar" class="bg-duo-red h-2 rounded-full transition-all" style="width:0%"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── CHARTS ROW 1: Pie + Confidence Distribution ── -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+          <h2 class="text-sm font-semibold text-gray-700 mb-4">Sentiment Distribution</h2>
+          <div class="relative" style="height:260px">
+            <canvas id="chartPie"></canvas>
+          </div>
+        </div>
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+          <h2 class="text-sm font-semibold text-gray-700 mb-4">Confidence Distribution</h2>
+          <div class="relative" style="height:260px">
+            <canvas id="chartConf"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── RATING × SENTIMENT (visible only when ratings exist) ── -->
+      <div id="ratingChart" class="hidden bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+        <h2 class="text-sm font-semibold text-gray-700 mb-4">Rating × Sentiment Anomaly Map</h2>
+        <p class="text-xs text-gray-400 mb-4">
+          Compares star ratings (1–5) against predicted sentiment — useful for detecting reviews
+          where a high star rating contains negative language or vice versa.
+        </p>
+        <div class="relative" style="height:280px">
+          <canvas id="chartRating"></canvas>
+        </div>
+      </div>
+
+      <!-- ── WORD CLOUD ─────────────────────────────────── -->
+      <div id="wordCloudSection" class="hidden bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+        <h2 class="text-sm font-semibold text-gray-700 mb-4">Top Terms Word Cloud</h2>
+        <div id="wordCloudContainer" class="leading-loose py-2"></div>
+      </div>
+
+      <!-- ── RESULTS TABLE (CSV mode) ──────────────────── -->
+      <div id="resultsTableSection" class="hidden bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-700">Review-Level Predictions</h2>
+          <div class="flex items-center gap-3">
+            <input id="tableSearch" type="text" placeholder="Search reviews…"
+              oninput="filterTable()"
+              class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-duo-green w-48"/>
+            <select id="labelFilter" onchange="filterTable()"
+              class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-duo-green">
+              <option value="all">All Labels</option>
+              <option value="Positive">Positive</option>
+              <option value="Negative">Negative</option>
+            </select>
+            <button onclick="exportCsv()"
+              class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-lg transition">
+              ⬇ Export CSV
+            </button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+              <tr>
+                <th class="px-4 py-3 text-left w-8">#</th>
+                <th class="px-4 py-3 text-left">Review (Original)</th>
+                <th class="px-4 py-3 text-left w-24">Label</th>
+                <th class="px-4 py-3 text-left w-24">Confidence</th>
+                <th class="px-4 py-3 text-left w-16">Rating</th>
+              </tr>
+            </thead>
+            <tbody id="resultsTableBody" class="divide-y divide-gray-100"></tbody>
+          </table>
+        </div>
+        <div id="tablePagination" class="px-6 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+          <span id="tableInfo">Showing — rows</span>
+          <div class="flex gap-2">
+            <button id="prevPage" onclick="changePage(-1)"
+              class="px-3 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
+            <button id="nextPage" onclick="changePage(1)"
+              class="px-3 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /dashboard -->
+
+  </main>
+
+  <!-- ════════════════════════════════════════════════════════
+       FOOTER
+  ═══════════════════════════════════════════════════════════ -->
+  <footer class="mt-12 py-6 border-t border-gray-200 text-center text-xs text-gray-400">
+    DuolingoLens · IBM AI Builders Challenge · IT Track · Sentiment Analytics Dashboard
+  </footer>
+
+  <!-- ════════════════════════════════════════════════════════
+       JAVASCRIPT
+  ═══════════════════════════════════════════════════════════ -->
+  <script>
+  // ── Register Chart.js plugins ────────────────────────────
+  Chart.register(ChartDataLabels);
+
+  // ── State ────────────────────────────────────────────────
+  let _allResults   = [];   // full results array for table
+  let _filtered     = [];   // filtered subset
+  let _currentPage  = 1;
+  const PAGE_SIZE   = 20;
+  let _chartPie     = null;
+  let _chartConf    = null;
+  let _chartRating  = null;
+  let _activeTab    = 'text';
+  let _selectedFile = null;
+
+  // ── Health check ─────────────────────────────────────────
+  async function checkHealth() {
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      const dot  = document.getElementById('healthDot');
+      const txt  = document.getElementById('healthText');
+      if (data.model_ready) {
+        dot.className = 'inline-block w-2 h-2 rounded-full bg-green-500';
+        txt.textContent = 'Model ready';
+      } else {
+        dot.className = 'inline-block w-2 h-2 rounded-full bg-red-400';
+        txt.textContent = data.model_error || 'Model not ready';
+      }
+    } catch {
+      document.getElementById('healthDot').className = 'inline-block w-2 h-2 rounded-full bg-gray-300';
+      document.getElementById('healthText').textContent = 'Server unreachable';
+    }
+  }
+  checkHealth();
+
+  // ── Tab switching ─────────────────────────────────────────
+  function switchTab(tab) {
+    _activeTab = tab;
+    document.getElementById('panelText').classList.toggle('hidden', tab !== 'text');
+    document.getElementById('panelCsv').classList.toggle('hidden',  tab !== 'csv');
+    document.getElementById('tabText').className = tab === 'text' ? 'tab-active py-3 px-4 text-sm transition-all' : 'tab-inactive py-3 px-4 text-sm transition-all';
+    document.getElementById('tabCsv').className  = tab === 'csv'  ? 'tab-active py-3 px-4 text-sm transition-all' : 'tab-inactive py-3 px-4 text-sm transition-all';
+  }
+
+  // ── Character counter ─────────────────────────────────────
+  document.getElementById('textInput').addEventListener('input', function() {
+    document.getElementById('charCount').textContent = `${this.value.length} characters`;
+  });
+
+  // ── Error banner ──────────────────────────────────────────
+  function showError(msg) {
+    const banner = document.getElementById('errorBanner');
+    document.getElementById('errorText').textContent = msg;
+    banner.classList.remove('hidden');
+    setTimeout(() => banner.classList.add('hidden'), 8000);
+  }
+  function hideError() {
+    document.getElementById('errorBanner').classList.add('hidden');
+  }
+
+  // ── Loading state ─────────────────────────────────────────
+  function setLoading(on) {
+    document.getElementById('loadingSkeleton').classList.toggle('hidden', !on);
+    document.getElementById('dashboard').classList.toggle('hidden', on);
+  }
+
+  // ── Text prediction ───────────────────────────────────────
+  async function predictText() {
+    const text = document.getElementById('textInput').value.trim();
+    if (!text) { showError('Please enter some text before analyzing.'); return; }
+    hideError();
+    setLoading(true);
+    try {
+      const res  = await fetch('/api/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showError(data.error || 'Prediction failed.'); setLoading(false); return; }
+      renderDashboard([data.result], data.analytics, 'text');
+    } catch (e) {
+      showError('Network error: ' + e.message);
+      setLoading(false);
+    }
+  }
+
+  function clearText() {
+    document.getElementById('textInput').value = '';
+    document.getElementById('charCount').textContent = '0 characters';
+    hideDashboard();
+  }
+
+  // ── CSV handling ──────────────────────────────────────────
+  function handleFileSelect(input) {
+    if (input.files && input.files[0]) {
+      _selectedFile = input.files[0];
+      document.getElementById('fileName').textContent = `Selected: ${_selectedFile.name}`;
+      document.getElementById('dropZone').classList.add('border-duo-green', 'bg-green-50');
+    }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.csv')) {
+      _selectedFile = file;
+      document.getElementById('fileName').textContent = `Selected: ${file.name}`;
+      document.getElementById('dropZone').classList.add('border-duo-green', 'bg-green-50');
+    } else {
+      showError('Please drop a .csv file.');
+    }
+  }
+
+  async function predictCsv() {
+    if (!_selectedFile) { showError('Please select a CSV file first.'); return; }
+    hideError();
+    setLoading(true);
+    const form = new FormData();
+    form.append('file', _selectedFile);
+    try {
+      const res  = await fetch('/api/predict-csv', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) { showError(data.error || 'CSV prediction failed.'); setLoading(false); return; }
+      if (data.truncated) {
+        showError(`⚠ CSV had more than 1 000 rows. Only the first 1 000 were analyzed.`);
+      }
+      renderDashboard(data.results, data.analytics, 'csv');
+    } catch (e) {
+      showError('Network error: ' + e.message);
+      setLoading(false);
+    }
+  }
+
+  function clearCsv() {
+    _selectedFile = null;
+    document.getElementById('csvFileInput').value = '';
+    document.getElementById('fileName').textContent = '';
+    document.getElementById('dropZone').classList.remove('border-duo-green', 'bg-green-50');
+    hideDashboard();
+  }
+
+  function hideDashboard() {
+    document.getElementById('dashboard').classList.add('hidden');
+    document.getElementById('loadingSkeleton').classList.add('hidden');
+  }
+
+  // ── Render dashboard ──────────────────────────────────────
+  function renderDashboard(results, analytics, mode) {
+    setLoading(false);
+    document.getElementById('dashboard').classList.remove('hidden');
+
+    // KPI cards
+    document.getElementById('kpiTotal').textContent     = analytics.total.toLocaleString();
+    document.getElementById('kpiPositive').textContent  = analytics.positive.toLocaleString();
+    document.getElementById('kpiNegative').textContent  = analytics.negative.toLocaleString();
+    document.getElementById('kpiPositivePct').textContent = `${analytics.positive_pct}%`;
+    document.getElementById('kpiNegativePct').textContent = `${analytics.negative_pct}%`;
+    const ratio = analytics.negative > 0 ? (analytics.positive / analytics.negative).toFixed(2) : '∞';
+    document.getElementById('kpiRatio').textContent = ratio;
+
+    // Single result highlight (text mode)
+    const singleEl = document.getElementById('singleResult');
+    if (mode === 'text' && results.length === 1) {
+      const r = results[0];
+      singleEl.classList.remove('hidden');
+      document.getElementById('srRawText').textContent     = r.raw_text;
+      document.getElementById('srCleanedText').textContent = r.cleaned_text || '(empty after cleaning)';
+      const labelEl = document.getElementById('srLabel');
+      labelEl.textContent = r.label;
+      labelEl.className   = r.label === 'Positive' ? 'text-2xl font-bold text-duo-green' : 'text-2xl font-bold text-duo-red';
+
+      const posScore = ((r.scores?.Positive ?? 0) * 100).toFixed(1);
+      const negScore = ((r.scores?.Negative ?? 0) * 100).toFixed(1);
+      document.getElementById('srPosScore').textContent = `${posScore}%`;
+      document.getElementById('srNegScore').textContent = `${negScore}%`;
+      document.getElementById('srPosBar').style.width   = `${posScore}%`;
+      document.getElementById('srNegBar').style.width   = `${negScore}%`;
+    } else {
+      singleEl.classList.add('hidden');
+    }
+
+    // Pie chart
+    renderPieChart(analytics.positive, analytics.negative);
+
+    // Confidence distribution chart
+    renderConfChart(analytics.confidence_distribution);
+
+    // Rating × sentiment chart
+    if (analytics.rating_sentiment && Object.keys(analytics.rating_sentiment).length > 0) {
+      renderRatingChart(analytics.rating_sentiment);
+      document.getElementById('ratingChart').classList.remove('hidden');
+    } else {
+      document.getElementById('ratingChart').classList.add('hidden');
+    }
+
+    // Word cloud
+    if (analytics.word_cloud && analytics.word_cloud.length > 0) {
+      renderWordCloud(analytics.word_cloud);
+      document.getElementById('wordCloudSection').classList.remove('hidden');
+    } else {
+      document.getElementById('wordCloudSection').classList.add('hidden');
+    }
+
+    // Results table (CSV mode)
+    if (mode === 'csv') {
+      _allResults  = results;
+      _filtered    = [...results];
+      _currentPage = 1;
+      document.getElementById('resultsTableSection').classList.remove('hidden');
+      renderTable();
+    } else {
+      document.getElementById('resultsTableSection').classList.add('hidden');
+    }
+  }
+
+  // ── Chart: Pie ────────────────────────────────────────────
+  function renderPieChart(positive, negative) {
+    const ctx = document.getElementById('chartPie').getContext('2d');
+    if (_chartPie) _chartPie.destroy();
+    _chartPie = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Positive', 'Negative'],
+        datasets: [{
+          data: [positive, negative],
+          backgroundColor: ['#58CC02', '#FF4B4B'],
+          borderWidth: 0,
+          hoverOffset: 8,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'bottom', labels: { padding: 16, font: { size: 12 } } },
+          datalabels: {
+            color: '#fff',
+            font: { weight: 'bold', size: 13 },
+            formatter: (val, ctx) => {
+              const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+              return total ? `${(val / total * 100).toFixed(1)}%` : '';
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // ── Chart: Confidence distribution ───────────────────────
+  function renderConfChart(dist) {
+    const ctx = document.getElementById('chartConf').getContext('2d');
+    if (_chartConf) _chartConf.destroy();
+    _chartConf = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['Low (< 60%)', 'Medium (60–85%)', 'High (> 85%)'],
+        datasets: [{
+          label: 'Reviews',
+          data: [dist.Low, dist.Medium, dist.High],
+          backgroundColor: ['#FFC800', '#1CB0F6', '#58CC02'],
+          borderRadius: 8,
+          borderSkipped: false,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'top',
+            color: '#57606a', font: { size: 11, weight: '600' },
+            formatter: v => v > 0 ? v : '',
+          }
+        },
+        scales: {
+          y: { beginAtZero: true, grid: { color: '#f3f4f6' }, ticks: { font: { size: 11 } } },
+          x: { grid: { display: false }, ticks: { font: { size: 11 } } }
+        }
+      }
+    });
+  }
+
+  // ── Chart: Rating × Sentiment ─────────────────────────────
+  function renderRatingChart(ratingMap) {
+    const ctx = document.getElementById('chartRating').getContext('2d');
+    if (_chartRating) _chartRating.destroy();
+    const ratings   = Object.keys(ratingMap).sort();
+    const posData   = ratings.map(r => ratingMap[r].Positive || 0);
+    const negData   = ratings.map(r => ratingMap[r].Negative || 0);
+    _chartRating = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ratings.map(r => `⭐ ${r}`),
+        datasets: [
+          { label: 'Positive', data: posData, backgroundColor: '#58CC02', borderRadius: 5, borderSkipped: false },
+          { label: 'Negative', data: negData, backgroundColor: '#FF4B4B', borderRadius: 5, borderSkipped: false },
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { padding: 14, font: { size: 12 } } },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { stacked: false, grid: { display: false }, ticks: { font: { size: 12 } } },
+          y: { stacked: false, beginAtZero: true, grid: { color: '#f3f4f6' }, ticks: { font: { size: 11 } } }
+        }
+      }
+    });
+  }
+
+  // ── Word cloud (CSS-driven) ───────────────────────────────
+  function renderWordCloud(words) {
+    const container = document.getElementById('wordCloudContainer');
+    container.innerHTML = '';
+    const maxVal = words[0]?.value || 1;
+    const COLORS = ['#58CC02','#1CB0F6','#FFC800','#FF4B4B','#7c5cd8','#f97316','#06b6d4','#ec4899'];
+    words.forEach((w, i) => {
+      const span = document.createElement('span');
+      span.textContent = w.text;
+      const ratio     = w.value / maxVal;
+      const fontSize  = Math.max(11, Math.round(11 + ratio * 28));
+      const opacity   = Math.max(0.45, ratio);
+      span.style.fontSize   = `${fontSize}px`;
+      span.style.opacity    = opacity;
+      span.style.background = COLORS[i % COLORS.length] + '1a';
+      span.style.color      = COLORS[i % COLORS.length];
+      span.style.border     = `1px solid ${COLORS[i % COLORS.length]}33`;
+      span.title = `${w.text}: ${w.value} occurrences`;
+      container.appendChild(span);
+    });
+  }
+
+  // ── Results table ─────────────────────────────────────────
+  function renderTable() {
+    const tbody     = document.getElementById('resultsTableBody');
+    const totalRows = _filtered.length;
+    const start     = (_currentPage - 1) * PAGE_SIZE;
+    const end       = Math.min(start + PAGE_SIZE, totalRows);
+    const pageData  = _filtered.slice(start, end);
+
+    tbody.innerHTML = pageData.map((r, idx) => {
+      const rowClass  = r.label === 'Positive' ? 'row-positive' : r.label === 'Negative' ? 'row-negative' : '';
+      const badgeClass = r.label === 'Positive' ? 'badge-pos' : r.label === 'Negative' ? 'badge-neg' : 'badge-unk';
+      const confPct   = (r.confidence * 100).toFixed(1);
+      const rating    = r.rating != null ? `<span class="text-yellow-500">${'⭐'.repeat(Math.min(r.rating, 5))}</span><span class="text-xs text-gray-400 ml-1">${r.rating}</span>` : '—';
+      return `
+        <tr class="${rowClass} hover:opacity-90 transition">
+          <td class="px-4 py-3 text-gray-400 text-xs">${start + idx + 1}</td>
+          <td class="px-4 py-3 text-gray-800 max-w-sm">
+            <p class="line-clamp-2 text-sm">${escapeHtml(r.raw_text)}</p>
+          </td>
+          <td class="px-4 py-3"><span class="${badgeClass}">${r.label}</span></td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="w-16 bg-gray-200 rounded-full h-1.5">
+                <div class="${r.label === 'Positive' ? 'bg-duo-green' : 'bg-duo-red'} h-1.5 rounded-full" style="width:${confPct}%"></div>
+              </div>
+              <span class="text-xs text-gray-500">${confPct}%</span>
+            </div>
+          </td>
+          <td class="px-4 py-3 text-sm">${rating}</td>
+        </tr>`;
+    }).join('');
+
+    document.getElementById('tableInfo').textContent =
+      `Showing ${start + 1}–${end} of ${totalRows.toLocaleString()} rows`;
+    document.getElementById('prevPage').disabled = _currentPage <= 1;
+    document.getElementById('nextPage').disabled = end >= totalRows;
+  }
+
+  function filterTable() {
+    const q     = document.getElementById('tableSearch').value.toLowerCase();
+    const label = document.getElementById('labelFilter').value;
+    _filtered = _allResults.filter(r => {
+      const matchText  = !q || r.raw_text.toLowerCase().includes(q);
+      const matchLabel = label === 'all' || r.label === label;
+      return matchText && matchLabel;
+    });
+    _currentPage = 1;
+    renderTable();
+  }
+
+  function changePage(delta) {
+    const maxPage = Math.ceil(_filtered.length / PAGE_SIZE);
+    _currentPage = Math.max(1, Math.min(_currentPage + delta, maxPage));
+    renderTable();
+  }
+
+  // ── Export CSV ────────────────────────────────────────────
+  function exportCsv() {
+    const headers = ['#', 'raw_text', 'cleaned_text', 'label', 'confidence', 'rating'];
+    const rows    = _filtered.map((r, i) =>
+      [i + 1, `"${(r.raw_text || '').replace(/"/g, '""')}"`,
+       `"${(r.cleaned_text || '').replace(/"/g, '""')}"`,
+       r.label, r.confidence, r.rating ?? ''].join(',')
+    );
+    const csv  = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'duolingo_sentiment_results.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── Utility ───────────────────────────────────────────────
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+  </script>
+
+</body>
+</html>
